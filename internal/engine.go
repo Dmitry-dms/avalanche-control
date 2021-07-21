@@ -3,9 +3,11 @@ package internal
 import (
 	"context"
 	"fmt"
+	"log"
+	"net/http"
+
 	"github.com/Dmitry-dms/avalanche-control/pkg/serializer"
 	redis "github.com/go-redis/redis/v8"
-	"log"
 )
 
 type Config struct {
@@ -16,19 +18,24 @@ type Config struct {
 }
 
 type Engine struct {
-	Context          context.Context
-	Conf             Config
-	Logger           *log.Logger
-	Cache            *Cache
-	MsgChannel       chan redisMessage
-	RedisMsg         func(payload []byte) error
-	RedisGetInfo     *redis.PubSub
-	RedisAddCompany  func(company addCompanyResponse) error
-	RedisCommandsSub func(payload []byte) error
-	Serializer       serializer.AvalancheSerializer
+	Context           context.Context
+	Conf              Config
+	Logger            *log.Logger
+	Cache             *Cache
+	MsgChannel        chan redisMessage
+	AddCompanyChannel chan AddCompanyMessage
+	RedisMsg          func(payload []byte) error
+	RedisGetInfo      *redis.PubSub
+	RedisAddCompany   func(company addCompanyResponse) error
+	RedisCommands     func(payload []byte) error
+	Serializer        serializer.AvalancheSerializer
 }
 
-func NewEngine(ctx context.Context, config Config, logger *log.Logger, cache *Cache) (*Engine, error) {
+func (e *Engine) Info(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprint(w, e.Cache.Show())
+}
+
+func NewEngine(ctx context.Context, config Config, logger *log.Logger, cache *Cache, ser serializer.AvalancheSerializer) (*Engine, error) {
 	red := initRedis(config.RedisAddress)
 
 	redisMsg := func(payload []byte) error {
@@ -42,20 +49,23 @@ func NewEngine(ctx context.Context, config Config, logger *log.Logger, cache *Ca
 	}
 
 	if err := red.Ping(red.Context()).Err(); err != nil {
-		logger.Println(err)
+		logger.Fatalln(err)
 	}
 	e := &Engine{
-		Context:          ctx,
-		Conf:             config,
-		Logger:           logger,
-		RedisMsg:         redisMsg,
-		RedisGetInfo:     redisInfo,
-		RedisCommandsSub: redisMain,
-		Cache:            cache,
-		MsgChannel:       make(chan redisMessage),
+		Context:           ctx,
+		Conf:              config,
+		Logger:            logger,
+		RedisMsg:          redisMsg,
+		RedisGetInfo:      redisInfo,
+		RedisCommands:     redisMain,
+		Cache:             cache,
+		MsgChannel:        make(chan redisMessage),
+		AddCompanyChannel: make(chan AddCompanyMessage),
+		Serializer:        ser,
 	}
 	go e.sendMessages()
-	go e.listeningCommands()
+	go e.getInfo()
+	go e.sendCommands()
 	logger.Println(fmt.Sprintf("Monitoring server succesfully connected to hub"))
 	return e, nil
 }
@@ -80,17 +90,27 @@ type addCompanyResponse struct {
 	CompanyName string       `json:"company_name"`
 }
 
-func (e *Engine) listeningCommands() {
-	var info CompanyStats
+func (e *Engine) getInfo() {
+	var info []CompanyStats
+	var addC addCompanyResponse
 	for msg := range e.RedisGetInfo.Channel() {
-		err := e.Serializer.Deserialize([]byte(msg.Payload), &info)
-		if err != nil {
-			e.Logger.Println(err)
-		}
+		go func(msg *redis.Message) {
+			err := e.Serializer.Deserialize([]byte(msg.Payload), &info)
+			if err != nil {
+				err2 := e.Serializer.Deserialize([]byte(msg.Payload), &addC)
+				if err2 != nil {
+					e.Logger.Println(err2)
+				}
+				e.Logger.Printf("Added {%s} with token = %s, duration = %d, ws server: %s", addC.CompanyName, addC.Token.Token, addC.Token.Duration, addC.Token.ServerName)
+			}
+			for i := range info {
+				e.updateCache(info[i].Name, &info[i])
+			}
+		}(msg)
 	}
 }
-func (e *Engine) updateCache(stats CompanyStats) {
-	e.Cache.update(&stats)
+func (e *Engine) updateCache(companyName string, stats *CompanyStats) {
+	e.Cache.update(companyName, stats)
 }
 func (e *Engine) serializeAndSend(v interface{}, f func(payload []byte) error) error {
 	payload, err := e.Serializer.Serialize(v)
@@ -114,6 +134,14 @@ func (e *Engine) sendMessages() {
 			e.Logger.Println(err)
 		}
 		e.Logger.Printf("Message {%s} to client {%s} with company id {%s}", msg.Message, msg.ClientId, msg.CompanyName)
+	}
+}
+func (e *Engine) sendCommands() {
+	for msg := range e.AddCompanyChannel {
+		err := e.serializeAndSend(msg, e.RedisCommands)
+		if err != nil {
+			e.Logger.Println(err)
+		}
 	}
 }
 func initRedis(address string) *redis.Client {
