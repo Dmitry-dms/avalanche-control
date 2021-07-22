@@ -25,7 +25,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	http.HandleFunc("/i", eng.Info)
-	log.Println(http.ListenAndServe(":8020", http.DefaultServeMux))
+	mux := eng.NewServeMux()
+	log.Println(http.ListenAndServe(":8040", mux))
 }
 

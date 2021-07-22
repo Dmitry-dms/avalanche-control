@@ -7,9 +7,9 @@ type CompanyStats struct {
 	Users       []ClientStat `json:"active_users"`
 }
 type stats struct {
-	OnlineUsers uint        
-	MaxUsers    uint         
-	Users       []ClientStat 
+	OnlineUsers uint
+	MaxUsers    uint
+	Users       map[string]struct{}
 }
 type ClientStat struct {
 	UserId string `json:"user_id"`
@@ -28,10 +28,23 @@ func (c *Cache) Show() map[string]*stats {
 	return c.Info
 }
 func (c *Cache) update(companyName string, info *CompanyStats) {
+	users := make(map[string]struct{})
+	for i := range info.Users {
+		users[info.Users[i].UserId] = struct{}{}
+	}
 	stat := &stats{
 		OnlineUsers: info.OnlineUsers,
-		MaxUsers: info.MaxUsers,
-		Users: info.Users,
+		MaxUsers:    info.MaxUsers,
+		Users:       users,
 	}
 	c.Info[companyName] = stat
+}
+func (c *Cache) GetUser(companyName string, userId string) (bool, bool) {
+	company, ok := c.Info[companyName]
+	_, u := company.Users[userId]
+	return ok, u
+}
+func (c *Cache) GetCompany(companyName string) bool {
+	_, ok := c.Info[companyName]
+	return ok
 }

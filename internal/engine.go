@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -34,6 +35,70 @@ type Engine struct {
 func (e *Engine) Info(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, e.Cache.Show())
 }
+func (e *Engine) NewServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/msg", e.sendMessage)
+	mux.HandleFunc("/add-company", e.addCompany)
+	mux.HandleFunc("/", e.homePage)
+	mux.HandleFunc("/i", e.Info)
+	return mux
+}
+
+
+
+func (e *Engine) sendMessage(w http.ResponseWriter, r *http.Request) {
+	var message redisMessage
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&message)
+	if err != nil {
+		printError(w, "Can't decode json", 400) // 400 Bad Request
+		return
+	}
+	company, user := e.Cache.GetUser(message.CompanyName, message.ClientId)
+	if !company {
+		printError(w, "Company doesn't exists", 404) // 404 Not Found
+		return
+	}
+	if !user {
+		printError(w, "User doesn't exists", 404) // 404 Not Found
+		return
+	}
+	e.MsgChannel <- redisMessage{
+		CompanyName: message.CompanyName,
+		ClientId: message.ClientId,
+		Message: message.Message,
+	}
+	w.Write([]byte("Success"))
+}
+func (e *Engine) addCompany(w http.ResponseWriter, r *http.Request) {
+	var message AddCompanyMessage
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&message)
+	if err != nil {
+		printError(w, "Can't decode json", 400) // 400 Bad Request
+		return
+	}
+	company := e.Cache.GetCompany(message.CompanyName)
+	if company {
+		printError(w, "Company already exists", 400) // 400 Bad Request
+		return
+	}
+	e.AddCompanyChannel <- AddCompanyMessage{
+		CompanyName: message.CompanyName,
+		MaxUsers: message.MaxUsers,
+		Duration: message.Duration,
+	}
+	w.Write([]byte("Information was send. Please wait a moment"))
+}
+func printError(w http.ResponseWriter, msg string, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	str := fmt.Sprintf(`{"Reason":"%s"}`, msg)
+	fmt.Fprint(w, str)
+}
+func (e *Engine) homePage(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte("Home Page"))
+}
 
 func NewEngine(ctx context.Context, config Config, logger *log.Logger, cache *Cache, ser serializer.AvalancheSerializer) (*Engine, error) {
 	red := initRedis(config.RedisAddress)
@@ -49,7 +114,7 @@ func NewEngine(ctx context.Context, config Config, logger *log.Logger, cache *Ca
 	}
 
 	if err := red.Ping(red.Context()).Err(); err != nil {
-		logger.Fatalln(err)
+		logger.Println(err)
 	}
 	e := &Engine{
 		Context:           ctx,
